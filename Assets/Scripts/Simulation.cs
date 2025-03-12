@@ -164,7 +164,7 @@ public class Simulation : MonoBehaviour
         var maxElevation = createDam.GetMaxElevationSelected();
         var selectedPixels = createDam.GetSelectedPixels();
 
-        maxL = metersPerPixel / particlesPerPixel;
+        maxL = metersPerPixel / particlesPerPixel * 2.5f;
 
         List<Vector2> positionList = new();
         List<float> initHList = new();
@@ -197,7 +197,7 @@ public class Simulation : MonoBehaviour
                         {
                             positionList.Add((Vector2)domain.min + position / mapDomain.size * domain.size);
 
-                            initHList.Add((maxElevation - elevation) * 1000f);
+                            initHList.Add(-1);
                             initLList.Add(maxL);
 
                             Vector2 mappedPosition = (position - (Vector2)domain.min) / domain.size * mapDomain.size + (Vector2)mapDomain.min;
@@ -265,7 +265,7 @@ public class Simulation : MonoBehaviour
 
     private void BucketGeneration()
     {
-        bucketResolution = Mathf.CeilToInt(domain.size.x / (2 * maxL));
+        bucketResolution = Mathf.CeilToInt(domain.size.x / maxL);
 
         // Initialize bucket buffer with maximum possible particles per cell
         var totalBucketSize = bucketResolution * bucketResolution * MaxParticlesPerPixel;
@@ -302,6 +302,7 @@ public class Simulation : MonoBehaviour
 
         _waterDepthShader.SetBuffer(0, ShaderIDs.Bucket, _bucketBuffer);
         _waterDepthShader.SetBuffer(0, ShaderIDs.PositionBuffer, _positionBuffer);
+        _waterDepthShader.SetBuffer(0, ShaderIDs.InitWaterDepthBuffer, _initWaterDepthBuffer);
         _waterDepthShader.SetBuffer(0, ShaderIDs.WaterDepthBuffer, _waterDepthBuffer);
         _waterDepthShader.SetBuffer(0, ShaderIDs.SmoothingLengthBuffer, _smoothingLengthBuffer);
 

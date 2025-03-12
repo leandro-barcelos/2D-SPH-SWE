@@ -39,7 +39,7 @@ float W(float rIJ, float l)
 
 float sampleElevation(float2 position)
 {
-    uint2 uv = uint2((position - _DomainMin) / (_DomainMax - _DomainMin));
+    float2 uv = (position - _DomainMin) / (_DomainMax - _DomainMin);
     return _ElevationTexture.SampleLevel(my_linear_clamp_sampler, uv, 0) * 1000.0;
 }
 
@@ -54,7 +54,15 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
     uint i = id.x;
 
-    if (_WaterDepthBuffer[i] <= Epsilon || _SmoothingLengthBuffer[i] <= Epsilon) return;
+    // Define a threshold for "nearly dry" particles
+    const float DryThreshold = 0.01f;
+
+    // If particle is completely dry, just return (no movement)
+    if (_WaterDepthBuffer[i] <= Epsilon)
+        return;
+
+    // Special handling for nearly dry particles
+    bool nearlyDry = _WaterDepthBuffer[i] < DryThreshold;
 
     float2 sum = 0.0;
 
@@ -74,14 +82,41 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
                 float rIJ = distance(pos, _PositionBuffer[j]);
 
-                sum += _ParticleVolume / _WaterDepthBuffer[i] * (sampleElevation(_PositionBuffer[j]) - sampleElevation(pos)) * W(rIJ, _SmoothingLengthBuffer[i]) * normalize(pos - _PositionBuffer[j]);
+                sum += _Gravity * _ParticleVolume / _WaterDepthBuffer[i] * (sampleElevation(_PositionBuffer[j]) - sampleElevation(pos)) * W(rIJ, _SmoothingLengthBuffer[i]) * normalize(pos - _PositionBuffer[j]);
             }
         }
     }
 
-    float2 acceleration = (sum - POW2(_RoughnessCoeff) * length(_VelocityBuffer[i]) * _VelocityBuffer[i] / pow(_WaterDepthBuffer[i], 4.0 / 3.0)) * _Gravity;
+    float2 frictionTerm = -_Gravity * POW2(_RoughnessCoeff) * length(_VelocityBuffer[i]) * _VelocityBuffer[i] / pow(_WaterDepthBuffer[i], 4.0 / 3.0);
+
+    float2 acceleration;
+    
+    if (nearlyDry)
+    {
+        // For nearly dry particles, only apply a fraction of the force
+        // and ignore friction term which causes division by small numbers
+        float drynessFactor = _WaterDepthBuffer[i] / DryThreshold;
+        acceleration = sum * _Gravity * drynessFactor;
+        
+        // Add very small drag to slow down dry particles
+        acceleration -= _VelocityBuffer[i] * 0.1;
+    } 
+    else
+    {
+        acceleration = sum + frictionTerm;
+    }
+
+    if (nearlyDry)
+    {
+        _VelocityBuffer[i] *= 0.95;
+    }
 
     _VelocityBuffer[i] += acceleration * _TimeStep;
 
+    // Check for NaN or Inf values and correct them
+    if (any(isnan(_VelocityBuffer[i])) || any(isinf(_VelocityBuffer[i]))) {
+        _VelocityBuffer[i] = 0.0;
+    }
+    
     _PositionBuffer[i] = clamp(_PositionBuffer[i] + _VelocityBuffer[i] * _TimeStep, _DomainMin, _DomainMax);
 }

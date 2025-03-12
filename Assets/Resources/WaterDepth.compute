@@ -13,6 +13,7 @@ StructuredBuffer<uint> _Bucket;
 StructuredBuffer<float2> _PositionBuffer;
 StructuredBuffer<float> _SmoothingLengthBuffer;
 RWStructuredBuffer<float> _WaterDepthBuffer;
+RWStructuredBuffer<float> _InitWaterDepthBuffer;
 
 // Parameters
 float2 _DomainMax;
@@ -65,5 +66,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         }
     }
     
-    _WaterDepthBuffer[i] = h;
+    if(_InitWaterDepthBuffer[i] == -1)
+        _InitWaterDepthBuffer[i] = max(h, 0.001);
+
+    _WaterDepthBuffer[i] = max(h, 0.001);
 }
