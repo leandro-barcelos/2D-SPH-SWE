@@ -1,0 +1,41 @@
+#define NUM_THREADS 1024
+
+struct MeshProperties {
+    float4x4 mat;
+    float4 color;
+};
+
+RWStructuredBuffer<MeshProperties> _Properties;
+StructuredBuffer<float2> _PositionBuffer;
+StructuredBuffer<float> _WaterDepthBuffer;
+
+uint _N;
+float2 _DomainMax;
+float2 _DomainMin;
+float2 _MapMax;
+float2 _MapMin;
+
+
+#pragma kernel CSMain
+
+[numthreads(NUM_THREADS, 1, 1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    // Check if we're within texture bounds
+    if (id.x >= _N)
+        return;
+
+    uint i = id.x;
+
+    float2 position = _PositionBuffer[i];
+
+    position = _MapMin + (position - _DomainMin) / (_DomainMax - _DomainMin) * (_MapMax - _MapMin);
+
+    // Update matrix position
+    _Properties[i].mat[0][3] = position.x;
+    _Properties[i].mat[1][3] = position.y;
+
+    // Set color based on speed
+    float t = saturate(_WaterDepthBuffer[i] / 50.0);
+    _Properties[i].color = lerp(float4(0, 0, 1, 1), float4(0, 1, 0, 1), t);
+}

@@ -1,0 +1,98 @@
+#define NUM_THREADS 1024
+#define MAX_PARTICLES_PER_VOXEL 8
+#define POW3(x) ((x)*(x)*(x))
+#define POW2(x) ((x)*(x))
+
+static const float PI = 3.14159265358979323846264338327950288;
+static const float Epsilon = 1e-5;
+
+struct ShaderParameters
+{
+    uint _MaxL;
+    uint _TimeStep;
+};
+
+#pragma enable_d3d11_debug_symbols
+
+// Buffers
+RWStructuredBuffer<float2> _PositionBuffer;
+RWStructuredBuffer<float2> _VelocityBuffer;
+StructuredBuffer<float> _WaterDepthBuffer;
+StructuredBuffer<float> _SmoothingLengthBuffer;
+StructuredBuffer<uint> _Bucket;
+Texture2D<float> _ElevationTexture;
+SamplerState my_linear_clamp_sampler;
+
+// Parameters
+float2 _DomainMax;
+float2 _DomainMin;
+float _TexturePixelSize;
+float _MetersPerPixel;
+float _ParticleVolume;
+float _Gravity;
+float _RoughnessCoeff;
+float _TimeStep;
+uint _BucketResolution;
+uint _N;
+
+float W(float rIJ, float l)
+{
+    float q = rIJ / l;
+    if (q > 2.0 || q < 0.0) return 0.0;
+
+    float alpha = 15.0 / (7.0 * PI * POW2(l));
+
+    return alpha * (q < 1 ? 2.0 / 3.0 - POW2(q) + 0.5 * POW3(q) : POW3(2 - q) / 6.0);
+}
+
+float sampleElevation(float2 position)
+{
+    uint2 uv = uint2((position - _DomainMin) / (_DomainMax - _DomainMin));
+    return _ElevationTexture.SampleLevel(my_linear_clamp_sampler, uv, 0) * 1000.0;
+}
+
+#pragma kernel CSMain
+
+[numthreads(NUM_THREADS, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    // Check if we're within texture bounds
+    if (id.x >= _N)
+        return;
+
+    uint i = id.x;
+
+    if (_WaterDepthBuffer[i] <= Epsilon || _SmoothingLengthBuffer[i] <= Epsilon) return;
+
+    float2 sum = 0.0;
+
+    float2 pos = _PositionBuffer[i];
+    int2 index3dI = int2((pos - _DomainMin) / (_DomainMax - _DomainMin) * (_BucketResolution - 1));
+    uint index1d = (index3dI.x + index3dI.y * _BucketResolution) * MAX_PARTICLES_PER_VOXEL;
+
+    for (int x_offset = -1; x_offset <= 1; x_offset++)
+    for (int y_offset = -1; y_offset <= 1; y_offset++){
+        uint2 index3dJ = index3dI + int2(x_offset, y_offset);
+        if(all(index3dJ >= 0) && all(index3dJ < _BucketResolution))
+        {
+            uint bktJ = (index3dJ.x + index3dJ.y * _BucketResolution) * MAX_PARTICLES_PER_VOXEL;
+            for (uint j2 = 0; j2 < MAX_PARTICLES_PER_VOXEL; j2++){
+                uint j = _Bucket[bktJ + j2];
+                if (j == _N) break;
+
+                float rIJ = distance(pos, _PositionBuffer[j]) / _TexturePixelSize * _MetersPerPixel;
+
+                sum += _ParticleVolume / _WaterDepthBuffer[i] * (sampleElevation(_PositionBuffer[j]) - sampleElevation(pos)) * W(rIJ, _SmoothingLengthBuffer[i]) * normalize(pos - _PositionBuffer[j]);
+            }
+        }
+    }
+
+    float2 acceleration = (sum - POW2(_RoughnessCoeff) * length(_VelocityBuffer[i]) * _VelocityBuffer[i] / pow(_WaterDepthBuffer[i], 4.0 / 3.0)) * _Gravity;
+
+    _VelocityBuffer[i] += acceleration * _TimeStep;
+
+    if (!isnan(_VelocityBuffer[i].x) && !isnan(_VelocityBuffer[i].y))
+    {
+        _PositionBuffer[i] = clamp(_PositionBuffer[i] + _VelocityBuffer[i] * _TimeStep, _DomainMin, _DomainMax);
+    }
+}
