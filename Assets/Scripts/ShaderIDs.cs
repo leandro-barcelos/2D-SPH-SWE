@@ -20,6 +20,8 @@ public class ShaderIDs
     public static readonly int ShaderParametersBuffer = Shader.PropertyToID("_ShaderParametersBuffer");
     public static readonly int WaterDepthBuffer = Shader.PropertyToID("_WaterDepthBuffer");
     public static readonly int SmoothingLengthBuffer = Shader.PropertyToID("_SmoothingLengthBuffer");
+    public static readonly int InitWaterDepthBuffer = Shader.PropertyToID("_InitWaterDepthBuffer");
+    public static readonly int InitSmoothingLengthBuffer = Shader.PropertyToID("_InitSmoothingLengthBuffer");
     public static readonly int RoughnessCoeff = Shader.PropertyToID("_RoughnessCoeff");
     public static readonly int ElevationTexture = Shader.PropertyToID("_ElevationTexture");
     public static readonly int Properties = Shader.PropertyToID("_Properties");

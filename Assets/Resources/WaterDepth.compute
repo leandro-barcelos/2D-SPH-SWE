@@ -9,21 +9,15 @@ static const float Epsilon = 1e-5;
 #pragma enable_d3d11_debug_symbols
 
 // Buffers
-RWStructuredBuffer<float2> _PositionBuffer;
-RWStructuredBuffer<float2> _VelocityBuffer;
-StructuredBuffer<float> _WaterDepthBuffer;
-StructuredBuffer<float> _SmoothingLengthBuffer;
 StructuredBuffer<uint> _Bucket;
-Texture2D<float> _ElevationTexture;
-SamplerState my_linear_clamp_sampler;
+StructuredBuffer<float2> _PositionBuffer;
+StructuredBuffer<float> _SmoothingLengthBuffer;
+RWStructuredBuffer<float> _WaterDepthBuffer;
 
 // Parameters
 float2 _DomainMax;
 float2 _DomainMin;
 float _ParticleVolume;
-float _Gravity;
-float _RoughnessCoeff;
-float _TimeStep;
 uint _BucketResolution;
 uint _N;
 
@@ -37,12 +31,6 @@ float W(float rIJ, float l)
     return alpha * (q < 1 ? 2.0 / 3.0 - POW2(q) + 0.5 * POW3(q) : POW3(2 - q) / 6.0);
 }
 
-float sampleElevation(float2 position)
-{
-    uint2 uv = uint2((position - _DomainMin) / (_DomainMax - _DomainMin));
-    return _ElevationTexture.SampleLevel(my_linear_clamp_sampler, uv, 0) * 1000.0;
-}
-
 #pragma kernel CSMain
 
 [numthreads(NUM_THREADS, 1, 1)]
@@ -54,13 +42,10 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
     uint i = id.x;
 
-    if (_WaterDepthBuffer[i] <= Epsilon || _SmoothingLengthBuffer[i] <= Epsilon) return;
-
-    float2 sum = 0.0;
+    float h = 0.0;
 
     float2 pos = _PositionBuffer[i];
     int2 index3dI = int2((pos - _DomainMin) / (_DomainMax - _DomainMin) * (_BucketResolution - 1));
-    uint index1d = (index3dI.x + index3dI.y * _BucketResolution) * MAX_PARTICLES_PER_VOXEL;
 
     for (int x_offset = -1; x_offset <= 1; x_offset++)
     for (int y_offset = -1; y_offset <= 1; y_offset++){
@@ -74,14 +59,11 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
                 float rIJ = distance(pos, _PositionBuffer[j]);
 
-                sum += _ParticleVolume / _WaterDepthBuffer[i] * (sampleElevation(_PositionBuffer[j]) - sampleElevation(pos)) * W(rIJ, _SmoothingLengthBuffer[i]) * normalize(pos - _PositionBuffer[j]);
+                h += _ParticleVolume * W(rIJ, 
+                _SmoothingLengthBuffer[i]);
             }
         }
     }
-
-    float2 acceleration = (sum - POW2(_RoughnessCoeff) * length(_VelocityBuffer[i]) * _VelocityBuffer[i] / pow(_WaterDepthBuffer[i], 4.0 / 3.0)) * _Gravity;
-
-    _VelocityBuffer[i] += acceleration * _TimeStep;
-
-    _PositionBuffer[i] = clamp(_PositionBuffer[i] + _VelocityBuffer[i] * _TimeStep, _DomainMin, _DomainMax);
+    
+    _WaterDepthBuffer[i] = h;
 }

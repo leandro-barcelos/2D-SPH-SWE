@@ -133,6 +133,25 @@ public class CreateDam : MonoBehaviour
         return selected;
     }
 
+    public float GetMaxElevationSelected()
+    {
+        var maxElevation = 0.0f;
+
+        for (int x = 0; x < textureDam.width; x++)
+        {
+            for (int y = 0; y < textureDam.height; y++)
+            {
+                if (textureDam.GetPixel(x, y) == fillColor)
+                {
+                    float elevation = textureOriginal.GetPixel(x, y).grayscale;
+                    maxElevation = Mathf.Max(maxElevation, elevation);
+                }
+            }
+        }
+
+        return maxElevation;
+    }
+
     public float GetPixelSize()
     {
         return transform.localScale.x / textureOriginal.width;

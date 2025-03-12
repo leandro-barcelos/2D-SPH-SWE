@@ -1,0 +1,52 @@
+#define NUM_THREADS 1024
+
+static const float Epsilon = 1e-5;
+
+struct ShaderParameters
+{
+    uint _MaxL;
+    uint _TimeStep;
+};
+
+#pragma enable_d3d11_debug_symbols
+
+// Buffers
+StructuredBuffer<float> _WaterDepthBuffer;
+StructuredBuffer<float> _InitWaterDepthBuffer;
+StructuredBuffer<float> _InitSmoothingLengthBuffer;
+RWStructuredBuffer<float> _SmoothingLengthBuffer;
+RWStructuredBuffer<ShaderParameters> _ShaderParametersBuffer;
+
+// Parameters
+uint _N;
+
+#pragma kernel CSMain
+
+[numthreads(NUM_THREADS, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    // Check if we're within texture bounds
+    if (id.x >= _N)
+        return;
+
+    uint i = id.x;
+    
+    _SmoothingLengthBuffer[i] = _InitSmoothingLengthBuffer[i] * sqrt(_WaterDepthBuffer[i] / _InitWaterDepthBuffer[i]);
+
+    // Atomically get max smoothing length
+    uint compareValue = _ShaderParametersBuffer[0]._MaxL;
+    uint outValue = 0;
+
+    uint i_val = asuint(max(_SmoothingLengthBuffer[i], asfloat(_ShaderParametersBuffer[0]._MaxL)));
+
+    [allow_uav_condition]
+    while (true)
+    {
+        InterlockedCompareExchange(_ShaderParametersBuffer[0]._MaxL, compareValue, i_val, outValue);
+        if (outValue == compareValue)
+            break;
+
+        compareValue = outValue;
+        i_val = asuint(max(_SmoothingLengthBuffer[i], asfloat(outValue)));
+    }
+}

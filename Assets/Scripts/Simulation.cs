@@ -37,15 +37,15 @@ public class Simulation : MonoBehaviour
 
     [Header("Initialization")]
     public GameObject mapGameObject;
-    public Texture2D elevationTexture; // !: m
+    public Texture2D elevationTexture;
     [Range(1, 10)] public int particlesPerPixel;
 
     [Header("Parameters")]
     public float totalVolume;
     [Range(0.01f, 1f)] public float lInitialConstant;
-    [Range(1f, 15f)] public float gravity = 9.8f; // !: m/s²
+    [Range(1f, 15f)] public float gravity = 9.8f;
     [Range(0f, 1f)] public float cfl;
-    [Range(0f, 1f)] public float roughnessCoeff; // !: s/m^1/3
+    [Range(0f, 1f)] public float roughnessCoeff;
     [Range(0f, 1f)] public float forceMagnitude;
 
     [Header("Rendering")]
@@ -56,7 +56,7 @@ public class Simulation : MonoBehaviour
     #region Private
 
     // Shaders
-    ComputeShader _bucketShader, _parametersShader, _posVelShader, _updateMeshPropertiesShader;
+    ComputeShader _bucketShader, _waterDepthShader, _smoothingLengthShader, _timeStepShader, _posVelShader, _updateMeshPropertiesShader;
     private int _threadGroups;
 
     // Bucket
@@ -69,10 +69,12 @@ public class Simulation : MonoBehaviour
     private Bounds mapDomain;
 
     // Particles
-    private ComputeBuffer _positionBuffer; // !: m
-    private ComputeBuffer _velocityBuffer; // !: m
-    private ComputeBuffer _waterDepthBuffer; // !: m
-    private ComputeBuffer _smoothingLengthBuffer; // !: m
+    private ComputeBuffer _positionBuffer;
+    private ComputeBuffer _velocityBuffer;
+    private ComputeBuffer _waterDepthBuffer;
+    private ComputeBuffer _smoothingLengthBuffer;
+    private ComputeBuffer _initWaterDepthBuffer;
+    private ComputeBuffer _initSmoothingLengthBuffer;
     private float texturePixelSize;
     private int n;
     private float v;
@@ -116,7 +118,9 @@ public class Simulation : MonoBehaviour
         if (simulationInitialized)
         {
             BucketGeneration();
-            UpdateParameters();
+            UpdateWaterDepth();
+            UpdateSmoothingLength();
+            UpdateTimeStep();
             UpdatePosVel();
             UpdateMeshProperties();
 
@@ -131,6 +135,8 @@ public class Simulation : MonoBehaviour
         _velocityBuffer?.Release();
         _waterDepthBuffer?.Release();
         _smoothingLengthBuffer?.Release();
+        _initWaterDepthBuffer?.Release();
+        _initSmoothingLengthBuffer?.Release();
         _particleMeshPropertiesBuffer?.Release();
         _particleArgsBuffer?.Release();
     }
@@ -142,7 +148,9 @@ public class Simulation : MonoBehaviour
     private void InitShaders()
     {
         _bucketShader = Resources.Load<ComputeShader>("Bucket");
-        _parametersShader = Resources.Load<ComputeShader>("Parameters");
+        _waterDepthShader = Resources.Load<ComputeShader>("WaterDepth");
+        _smoothingLengthShader = Resources.Load<ComputeShader>("SmoothingLength");
+        _timeStepShader = Resources.Load<ComputeShader>("TimeStep");
         _posVelShader = Resources.Load<ComputeShader>("PosVel");
         _updateMeshPropertiesShader = Resources.Load<ComputeShader>("UpdateMeshProperties");
 
@@ -153,8 +161,15 @@ public class Simulation : MonoBehaviour
     {
         texturePixelSize = createDam.GetPixelSize();
 
+        var maxElevation = createDam.GetMaxElevationSelected();
         var selectedPixels = createDam.GetSelectedPixels();
+
+        maxL = metersPerPixel / particlesPerPixel;
+
         List<Vector2> positionList = new();
+        List<float> initHList = new();
+        List<float> initLList = new();
+        List<MeshProperties> propertiesList = new();
 
         mapDomain = new(mapGameObject.transform.position, mapGameObject.transform.localScale);
 
@@ -176,23 +191,37 @@ public class Simulation : MonoBehaviour
                             y * texturePixelSize + j * texturePixelSize / particlesPerPixel
                         );
 
-                        positionList.Add((Vector2)domain.min + position / mapDomain.size * domain.size);
+                        float elevation = elevationTexture.GetPixelBilinear((position.x - domain.min.x) / domain.size.x, (position.y - domain.min.y) / domain.size.y).r;
+
+                        if (elevation < maxElevation)
+                        {
+                            positionList.Add((Vector2)domain.min + position / mapDomain.size * domain.size);
+
+                            initHList.Add((maxElevation - elevation) * 1000f);
+                            initLList.Add(maxL);
+
+                            Vector2 mappedPosition = (position - (Vector2)domain.min) / domain.size * mapDomain.size + (Vector2)mapDomain.min;
+
+                            propertiesList.Add(new MeshProperties
+                            {
+                                Mat = Matrix4x4.TRS(mappedPosition, Quaternion.Euler(-90, 0, 0), texturePixelSize / particlesPerPixel * 0.5f * Vector3.one),
+                                Color = Color.blue
+                            });
+                        }
                     }
                 }
             }
         }
 
         Vector2[] positions = positionList.ToArray();
+        float[] initH = initHList.ToArray();
+        float[] initL = initLList.ToArray();
+        MeshProperties[] properties = propertiesList.ToArray();
 
         n = positions.Length;
         v = totalVolume / n;
 
         Debug.Log($"Particle Count: {n}\nParticle Volume: {v}");
-
-        float[] h = new float[n];
-        float[] l = new float[n];
-
-        maxL = metersPerPixel / particlesPerPixel;
 
         _bounds = new Bounds(mapGameObject.transform.position, Vector3.one * 100f);
 
@@ -206,21 +235,6 @@ public class Simulation : MonoBehaviour
         _particleArgsBuffer.SetData(args);
 
         _particleMeshPropertiesBuffer = new ComputeBuffer(n, MeshProperties.Size());
-        MeshProperties[] properties = new MeshProperties[n];
-
-        for (int i = 0; i < n; i++)
-        {
-            h[i] = -1;
-            l[i] = maxL;
-
-            Vector2 mappedPosition = (positions[i] - (Vector2)domain.min) / domain.size * mapDomain.size + (Vector2)mapDomain.min;
-
-            properties[i] = new MeshProperties
-            {
-                Mat = Matrix4x4.TRS(mappedPosition, Quaternion.Euler(-90, 0, 0), texturePixelSize / particlesPerPixel * 0.5f * Vector3.one),
-                Color = Color.blue
-            };
-        }
 
         _particleMeshPropertiesBuffer.SetData(properties);
 
@@ -230,12 +244,19 @@ public class Simulation : MonoBehaviour
         _positionBuffer.SetData(positions);
 
         _velocityBuffer = new(n, sizeof(float) * 2);
+        Vector2[] initialVelocities = new Vector2[n];
+        _velocityBuffer.SetData(initialVelocities);
 
         _waterDepthBuffer = new(n, sizeof(float));
-        _waterDepthBuffer.SetData(h);
+
+        _initWaterDepthBuffer = new(n, sizeof(float));
+        _initWaterDepthBuffer.SetData(initH);
 
         _smoothingLengthBuffer = new(n, sizeof(float));
-        _smoothingLengthBuffer.SetData(l);
+        _smoothingLengthBuffer.SetData(initL);
+
+        _initSmoothingLengthBuffer = new(n, sizeof(float));
+        _initSmoothingLengthBuffer.SetData(initL);
     }
 
     #endregion
@@ -270,17 +291,27 @@ public class Simulation : MonoBehaviour
         _bucketShader.Dispatch(0, _threadGroups, 1, 1);
     }
 
-    private void UpdateParameters()
+    private void UpdateWaterDepth()
     {
         // Set shader parameters
-        _parametersShader.SetVector(ShaderIDs.DomainMax, domain.max);
-        _parametersShader.SetVector(ShaderIDs.DomainMin, domain.min);
-        _parametersShader.SetFloat(ShaderIDs.TexturePixelSize, texturePixelSize);
-        _parametersShader.SetFloat(ShaderIDs.MetersPerPixel, metersPerPixel);
-        _parametersShader.SetFloat(ShaderIDs.ParticleVolume, v);
-        _parametersShader.SetFloat(ShaderIDs.Gravity, gravity);
-        _parametersShader.SetInt(ShaderIDs.N, n);
-        _parametersShader.SetInt(ShaderIDs.BucketResolution, bucketResolution);
+        _waterDepthShader.SetVector(ShaderIDs.DomainMax, domain.max);
+        _waterDepthShader.SetVector(ShaderIDs.DomainMin, domain.min);
+        _waterDepthShader.SetFloat(ShaderIDs.ParticleVolume, v);
+        _waterDepthShader.SetInt(ShaderIDs.N, n);
+        _waterDepthShader.SetInt(ShaderIDs.BucketResolution, bucketResolution);
+
+        _waterDepthShader.SetBuffer(0, ShaderIDs.Bucket, _bucketBuffer);
+        _waterDepthShader.SetBuffer(0, ShaderIDs.PositionBuffer, _positionBuffer);
+        _waterDepthShader.SetBuffer(0, ShaderIDs.WaterDepthBuffer, _waterDepthBuffer);
+        _waterDepthShader.SetBuffer(0, ShaderIDs.SmoothingLengthBuffer, _smoothingLengthBuffer);
+
+        _waterDepthShader.Dispatch(0, _threadGroups, 1, 1);
+    }
+
+    private void UpdateSmoothingLength()
+    {
+        // Set shader parameters
+        _smoothingLengthShader.SetInt(ShaderIDs.N, n);
 
         ShaderParameters[] data = new ShaderParameters[1];
         data[0] = new ShaderParameters { maxL = 0.0f, timeStep = float.MaxValue };
@@ -288,17 +319,41 @@ public class Simulation : MonoBehaviour
         ComputeBuffer shaderParametersBuffer = new(1, sizeof(float) * 2);
         shaderParametersBuffer.SetData(data);
 
-        _parametersShader.SetBuffer(0, ShaderIDs.Bucket, _bucketBuffer);
-        _parametersShader.SetBuffer(0, ShaderIDs.PositionBuffer, _positionBuffer);
-        _parametersShader.SetBuffer(0, ShaderIDs.VelocityBuffer, _velocityBuffer);
-        _parametersShader.SetBuffer(0, ShaderIDs.WaterDepthBuffer, _waterDepthBuffer);
-        _parametersShader.SetBuffer(0, ShaderIDs.SmoothingLengthBuffer, _smoothingLengthBuffer);
-        _parametersShader.SetBuffer(0, ShaderIDs.ShaderParametersBuffer, shaderParametersBuffer);
+        _smoothingLengthShader.SetBuffer(0, ShaderIDs.WaterDepthBuffer, _waterDepthBuffer);
+        _smoothingLengthShader.SetBuffer(0, ShaderIDs.SmoothingLengthBuffer, _smoothingLengthBuffer);
+        _smoothingLengthShader.SetBuffer(0, ShaderIDs.InitWaterDepthBuffer, _initWaterDepthBuffer);
+        _smoothingLengthShader.SetBuffer(0, ShaderIDs.InitSmoothingLengthBuffer, _initSmoothingLengthBuffer);
+        _smoothingLengthShader.SetBuffer(0, ShaderIDs.ShaderParametersBuffer, shaderParametersBuffer);
 
-        _parametersShader.Dispatch(0, _threadGroups, 1, 1);
+        _smoothingLengthShader.Dispatch(0, _threadGroups, 1, 1);
 
         shaderParametersBuffer.GetData(data);
+        // if (!float.IsInfinity(data[0].maxL) && data[0].maxL != 0.0)
         maxL = data[0].maxL;
+
+        shaderParametersBuffer.Release();
+    }
+
+    private void UpdateTimeStep()
+    {
+        // Set shader parameters
+        _timeStepShader.SetFloat(ShaderIDs.Gravity, gravity);
+        _timeStepShader.SetInt(ShaderIDs.N, n);
+
+        ShaderParameters[] data = new ShaderParameters[1];
+        data[0] = new ShaderParameters { maxL = 0.0f, timeStep = float.MaxValue };
+
+        ComputeBuffer shaderParametersBuffer = new(1, sizeof(float) * 2);
+        shaderParametersBuffer.SetData(data);
+
+        _timeStepShader.SetBuffer(0, ShaderIDs.VelocityBuffer, _velocityBuffer);
+        _timeStepShader.SetBuffer(0, ShaderIDs.WaterDepthBuffer, _waterDepthBuffer);
+        _timeStepShader.SetBuffer(0, ShaderIDs.SmoothingLengthBuffer, _smoothingLengthBuffer);
+        _timeStepShader.SetBuffer(0, ShaderIDs.ShaderParametersBuffer, shaderParametersBuffer);
+
+        _timeStepShader.Dispatch(0, _threadGroups, 1, 1);
+
+        shaderParametersBuffer.GetData(data);
         if (!float.IsInfinity(data[0].timeStep))
             timeStep = cfl * data[0].timeStep;
 
@@ -310,8 +365,6 @@ public class Simulation : MonoBehaviour
         // Set shader parameters
         _posVelShader.SetVector(ShaderIDs.DomainMax, domain.max);
         _posVelShader.SetVector(ShaderIDs.DomainMin, domain.min);
-        _posVelShader.SetFloat(ShaderIDs.TexturePixelSize, texturePixelSize);
-        _posVelShader.SetFloat(ShaderIDs.MetersPerPixel, metersPerPixel);
         _posVelShader.SetFloat(ShaderIDs.ParticleVolume, v);
         _posVelShader.SetFloat(ShaderIDs.Gravity, gravity);
         _posVelShader.SetFloat(ShaderIDs.RoughnessCoeff, roughnessCoeff);
